@@ -1,0 +1,675 @@
+---
+title: "Airline Flight Delay Prediction Using Machine Learning Models"
+subtitle: "DA5030"
+author: "Janiel Thompson"
+date: "Spring 2024"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r LoadPackages, echo=F, message=F, comment=""}
+
+library(C50) # for decision trees
+library(caret) # for confusion matrices
+library(class) # for kNN
+
+```
+
+
+# Introduction
+
+Within the transportation industry, the airline industry is one of the most rapidly growing sectors and the size of the global market was estimated at 814.5 billion US dollars in 2023^[https://www.statista.com/markets/419/topic/490/aviation/#overview]. Flight delays negatively impact the industry causing significant financial losses and customer dissatisfaction^[https://dl.acm.org/doi/fullHtml/10.1145/3497701.3497725]. The United States Bureau of Transportation Statistics estimated a 41 billion dollar cost to travelers and the airline industry caused by over 20% of US flights being delayed in 2018^[https://medium.com/analytics-vidhya/using-machine-learning-to-predict-flight-delays-e8a50b0bb64c]. Reducing the losses and negative economic impact caused by flight delays can be achieved by improving airline operations and passenger satisfaction, and predicting flight delays is one step that can be taken to do so^[https://dl.acm.org/doi/fullHtml/10.1145/3497701.3497725]. The goal of this project is to utilize machine learning algorithms to predict whether a flight will be delayed and accuracy of 70% or greater will be considered a successful predictive outcome.
+
+
+# Data Exploration
+
+The data for this project is from the Airlines Delay Kaggle dataset^[https://www.kaggle.com/datasets/ulrikthygepedersen/airlines-delay/data] contributed by Ulrik Pedersen.
+
+```{r LoadData, echo=F, comment=""}
+
+# Get data from URL
+url <- "https://drive.google.com/uc?id=1uVH13ARstl_HLsycLdl6UCtZD6G7d2CT&export=download"
+# Save data in data frame
+flight.df <- read.csv(url)
+
+```
+
+
+### Data Structure
+
+There are `r format(nrow(flight.df), big.mark = ",")` observations of `r ncol(flight.df)` features in the dataset. Most features are numerical, with _Airline_, _AirportTo_, and _AirportFrom_ being categorical.
+
+```{r DataStructure, echo=F, comment=""}
+
+# Inspect structure of data frame
+str(flight.df)
+
+```
+ 
+ 
+### Data Summary
+
+* Flight represents the flight ID for each observation and therefore does not affect whether or not the flight will be delayed 
+* Time is the time of departure ranging from 10 (12:10 am) to 1439 (11:59 pm)
+* Length is the duration of the flight in minutes
+* Airline is the code for the airline taking flight
+* AirportFrom is the three-letter code for the airport from which the airline departed
+* AirportTo is the three-letter code for the destination airport
+* DayOfWeek is the the day of the week on which the flight took place, ranging from 1-7
+* Class is a binary feature where 0 indicates the flight was not delayed and 1 indicates that the flight was delayed. This will be the target variable for classification.
+
+```{r DataSummary, echo=F, comment=""}
+
+# Inspect the spread of the data
+summary(flight.df)
+
+```
+
+```{r RemoveIDCol, echo=F, comment=""}
+
+flight.df$Flight <- NULL
+
+```
+
+
+### Exploratory Data Plots
+
+
+```{r DelayByAirline, echo=F, comment=""}
+
+# Save airline codes in vector
+airlines <- sort(unique(flight.df$Airline))
+
+# Create vector to store number of delays for each airline
+count.airline.delay <- rep(NA, length(airlines))
+for (i in 1:length(airlines)) {
+  # Fill delay count vector with frequency for each airline
+  count.airline.delay[i] <- length(which(flight.df$Airline == airlines[i] & flight.df$Class == 1))
+}
+
+# Create vector to store number of non-delays for each airline
+count.airline.nodelay <- rep(NA, length(airlines))
+for (i in 1:length(airlines)) {
+  # Fill no delay count vector with frequency for each airline
+  count.airline.nodelay[i] <- length(which(flight.df$Airline == airlines[i] & flight.df$Class == 0))
+}
+
+# Create barplot showing number of delayed vs on-time flights for each airline
+barplot(rbind(count.airline.delay, count.airline.nodelay), beside=TRUE, names.arg = airlines,
+        las = 2, col = c("indianred3", "palegreen3"),
+        xlab = "Airline", ylab = "Frequency", main = "Number of Flights Delayed vs On-Time for Each Airline")
+legend("topright", c("Delayed", "On Time"), text.col = c("indianred3", "palegreen3"))
+
+```
+
+Most airlines had more flights leaving on time than being delayed, but not by a wide margin. Airline 'WN' had the highest number of delayed flights out of all airlines and was more than twice the number of their on-time flights. Having such a large number of delayed flights attributed to a single airline may affect the performance of the classification models.
+
+
+```{r DelayByDay, echo=F, comment=""}
+
+# Save day of week ints in vector
+days <- sort(unique(flight.df$DayOfWeek))
+
+# Create vector to store number of delays for each day of the week
+count.day.delay <- rep(NA, length(days))
+for (i in 1:length(days)) {
+  # Fill delay count vector with frequency for each day of the week
+  count.day.delay[i] <- length(which(flight.df$DayOfWeek == days[i] & flight.df$Class == 1))
+}
+
+# Create vector to store number of non-delays for each day of the week
+count.day.nodelay <- rep(NA, length(days))
+for (i in 1:length(days)) {
+  # Fill no delay count vector with frequency for each day of the week
+  count.day.nodelay[i] <- length(which(flight.df$DayOfWeek == days[i] & flight.df$Class == 0))
+}
+
+# Create barplot showing number of delayed vs on-time flights for each day of the week
+barplot(rbind(count.day.delay, count.day.nodelay), beside=TRUE, names.arg = days,
+        las = 2, col = c("indianred3", "palegreen3"),
+        xlab = "Day of Week", ylab = "Frequency", main = "Number of Flights Delayed vs On-Time for Each Day of the Week")
+legend("topright", c("Delayed", "On Time"), text.col = c("indianred3", "palegreen3"))
+
+```
+
+For all days of the week, the number of on-time flight marginally exceeds the number of delayed flights. The least number of flights take place on day 6.
+
+
+### Outlier Detection  
+
+```{r OutlierDetection, echo=F, comment=""}
+
+# Calculate the mean and standard deviation of time and length  features
+flight.means <- apply(flight.df[c("Time", "Length")], 2, mean)
+flight.sds <- apply(flight.df[c("Time", "Length")], 2, sd)
+
+# Create an empty data frame to store z-scores for each value
+mat <- matrix(ncol=2, nrow=nrow(flight.df))
+flight.zscores <- data.frame(mat)
+colnames(flight.zscores) <- c("Time", "Length")
+
+# Calculate z-scores for each column and place column in new data frame
+for (feature in c("Time", "Length")) {
+  flight.zscores[feature] <- (flight.df[feature] - flight.means[[feature]]) / flight.sds[[feature]]
+}
+
+# Find outliers where absolute value of z-score is greater than 3
+threshold <- 3
+time.outliers <- as.numeric(rownames(flight.zscores[which(abs(flight.zscores$Time) > threshold),]))
+length.outliers <- as.numeric(rownames(flight.zscores[which(abs(flight.zscores$Length) > threshold),]))
+
+```
+
+For this dataset, any departure time or flight length more than `r threshold` standard deviations away from the mean will be considered an outlier. There are `r length(time.outliers)` observations that are outliers with respect to time of departure, and `r length(length.outliers)` observations that are outliers with respect to flight length. The distribution of start time and flight length are shown below.
+
+
+```{r TimeDistribution, echo=F, comment=""}
+
+# Create histogram of flight start times
+time.hist <- hist(flight.df$Time, col="cadetblue4", xlab="Start Time", breaks=seq(0,1440,l=25), ylim=c(0,45000),
+                  main = "Distribution of Flight Start Times")
+
+# Overlay normal distribution curve
+x <- seq(min(flight.df$Time), max(flight.df$Time), length=100)
+y <- dnorm(x, mean(flight.df$Time), sd(flight.df$Time))
+y <- y * nrow(flight.df) * diff(time.hist$mids[1:2])
+
+lines(x, y, lwd=2)
+
+
+```
+
+
+All the data points for start time fall within the normal curve overlay and there is no skewness to the distribution. Each bar in the histogram represents one hour out of the day.
+
+```{r LengthDistribution, echo=F, comment=""}
+
+length.hist <- hist(flight.df$Length, col="plum3", xlab="Flight Length", main = "Distribution of Flight Durations")
+
+# Overlay normal distribution curve
+x <- seq(min(flight.df$Length), max(flight.df$Length), length=100)
+y <- dnorm(x, mean(flight.df$Length), sd(flight.df$Length))
+y <- y * nrow(flight.df) * diff(length.hist$mids[1:2])
+
+lines(x, y, lwd=2)
+
+```
+
+The distribution of flight durations is right-skewed and outlying flight lengths, outside the normal curve, are ~350 minutes and greater.
+
+
+# Data Shaping
+
+### Handling Missing Data
+
+The first step of data preparation will be removing missing or invalid data. The _is.na()_ function will be used to find missing values.
+
+```{r AnyNA, echo=F, comment=""}
+
+flight.na <- any(is.na(flight.df))
+
+```
+
+`r ifelse(flight.na, "Missing values were found in the dataset and rows containing missing data will be removed.", "No missing values were found in the dataset so missing value imputation is not required.")`
+However, the output of the summary function above shows that the lowest flight length in the dataset is 0 minutes. Since a flight length of zero isn't possible, these can be treated as missing values and removed since imputation is not appropriate without industry knowledge.
+
+```{r RemoveZeroLength, echo=F, comment=""}
+
+flight.df <- flight.df[-which(flight.df$Length == 0),]
+# Reset row numbers
+rownames(flight.df) <- NULL
+
+```
+
+Having removed rows where Length = 0, `r format(nrow(flight.df), big.mar = ",")` observations remain.
+
+
+## Training/Validation Split
+
+Prior to processing, the dataset will be split into a training set and a validation set to prevent data leakage. The training set will be composed of a random sampling of 80% of the dataset. The remaining observations will be placed into the validation set.
+
+```{r SplitData, echo=F, comment=""}
+
+# Set seed so sampling is reproducible
+set.seed(1)
+
+# Assign the number of rows and columns in the dataset to variables
+n <- nrow(flight.df)
+c <- ncol(flight.df)
+
+# Define proportion of dataset to be used for training
+# 80% of rows will be placed in training dataset 
+prop <- 0.8
+# Sample row numbers without replacement 
+train.rows <- sample(n, prop*n)
+
+# Construct training dataset with training set rows
+flight.train <- flight.df[train.rows,]
+# Construct validation dataset with remaining rows
+flight.val <- flight.df[-train.rows,]
+
+```
+
+The training set consists of `r format(nrow(flight.train), big.mark = ",")` observations, while the validation set contains `r format(nrow(flight.val), big.mark = ",")` observations.
+
+
+### Log-Transformation and Normalization
+
+The outliers for flight length range from `r min(flight.df$Length[length.outliers])` on the low end to `r max(flight.df$Length[length.outliers])` on the high end. Since outliers comprise `r round((length(length.outliers)/nrow(flight.df)) * 100)`% of the Length observations, the Length feature will be log-transformed to preserve the entire dataset and reduce the impact of outliers. There are no outliers for Time, but since the range is quite large, Min-Max normalization will be applied to the Time feature. This is to ensure the kNN algorithm is not impacted heavily by the scale. The normalization formula is:
+$$
+\frac{x_i - min(x)}{max(x) - min(x)}
+$$
+
+```{r LogTransformation, echo=F, comment=""}
+
+# Transform Length values in training and validation sets to log(value)
+flight.train$Length <- log(flight.train$Length)
+flight.val$Length <- log(flight.val$Length)
+
+```
+
+```{r MinMaxNormalizeFunc, echo=F, comment = ""}
+
+# Define and apply min-max normalization function to Time feature in training and validation sets
+normalize <- function(feature) {
+  return((feature - min(feature)) / (max(feature) - min(feature)))
+}
+
+flight.train$Time <- normalize(flight.train$Time)
+flight.val$Time <- normalize(flight.val$Time)
+
+```
+
+
+### Encoding Categorical Variables
+
+Since kNN is one of the algorithms that will be used for classification, encoding categorical variables is necessary. The categorical variables in the dataset are Airline, AirportFrom and AirportTo. Count Encoding will be applied to all 3 variables and they will be subsequently normalized using Min-Max Normalization.
+
+```{r CategoricalEncoding, echo=F, comment=""}
+
+# Define count encoding function
+# feature parameter represents a column in a data frame
+count.encode <- function(feature) {
+  
+  # Iterate through unique values in column
+  for (val in unique(feature)) {
+    # Get number of instances of val
+    freq <- length(which(feature == val))
+    # Replace value with its frequency
+    feature[feature == val] <- freq
+  }
+  # Convert character variable to numeric
+  return(as.numeric(feature))
+}
+
+# Apply count encoding to categorical features in training and validation sets
+
+flight.train$AirlineEncode <- count.encode(flight.train$Airline)
+flight.train$AirportFromEncode <- count.encode(flight.train$AirportFrom)
+flight.train$AirportToEncode <- count.encode(flight.train$AirportTo)
+
+
+flight.val$AirlineEncode <- count.encode(flight.val$Airline)
+flight.val$AirportFromEncode <- count.encode(flight.val$AirportFrom)
+flight.val$AirportToEncode <- count.encode(flight.val$AirportTo)
+
+```
+
+```{r MinMaxNormalize, echo=F, comment = ""}
+
+# Normalize encoded variables in training and validation sets using normalize function defined above
+
+flight.train$AirlineEncode <- normalize(flight.train$AirlineEncode)
+flight.train$AirportFromEncode <- normalize(flight.train$AirportFromEncode)
+flight.train$AirportToEncode <- normalize(flight.train$AirportToEncode)
+
+flight.val$AirlineEncode <- normalize(flight.val$AirlineEncode)
+flight.val$AirportFromEncode <- normalize(flight.val$AirportFromEncode)
+flight.val$AirportToEncode <- normalize(flight.val$AirportToEncode)
+
+```
+
+Taking a look at the training and validation sets we can see a similar spread of data for all variables below.
+
+
+##### Training Set Summary
+
+```{r InspectTrainSet, echo=F, comment=""}
+summary(flight.train)
+```
+
+##### Validation Set Summary
+
+```{r InspectValSet, echo=F, comment=""}
+summary(flight.val)
+```
+
+
+# Model Construction
+
+Before constructing the models, it's important to know whether the proportion of each classification is comparable between the original dataset and the training/validation sets. 
+
+```{r ClassProportions, echo=F, comment=""}
+
+class.proportions <- data.frame(rbind(prop.table(table(flight.df$Class)), prop.table(table(flight.train$Class)), prop.table(table(flight.val$Class))))
+rownames(class.proportions) <- c("Original", "Training", "Validation")
+colnames(class.proportions) <- c("0", "1")
+class.proportions
+
+```
+
+From the table above, we can see that ~55% of the observations in all 3 datasets belong to the negative class (not delayed) and ~45% to the positive class (delayed).
+
+**Airline Proportions**
+
+```{r AirlineProportions, echo=F, comment=""}
+
+airline.proportions <- data.frame(rbind(prop.table(table(flight.train$Airline)), prop.table(table(flight.val$Airline))))
+rownames(airline.proportions) <- c("Training", "Validation")
+colnames(airline.proportions) <- sort(unique(flight.df$Airline))
+airline.proportions
+
+```
+
+**Day of Week Proportions**
+
+```{r DayOfWeekProportions, echo=F, comment=""}
+
+day.proportions <- data.frame(rbind(prop.table(table(flight.train$DayOfWeek)), prop.table(table(flight.val$DayOfWeek))))
+rownames(day.proportions) <- c("Training", "Validation")
+colnames(day.proportions) <- sort(unique(flight.df$DayOfWeek))
+day.proportions
+
+```
+Similar to the proportions of the target variable in each dataset, the proportion of each airline and day of week is comparable between the training and validation set.
+
+
+## Decision Trees
+
+The **C50** package will be used to construct the decision trees for classifications. Class will be predicted as a function of all other features. 
+
+```{r C50.1, echo=F, comment=""}
+
+# Train model
+flight.C50.1 <- C5.0(as.factor(Class) ~ Time + Length + DayOfWeek + AirlineEncode + AirportFromEncode + AirportToEncode,
+                     data = flight.train)
+# Make predictions for validation set
+flight.C50.pred1 <- predict(flight.C50.1, flight.val)
+
+# Compare predictions for default to actual values 
+c50.matrix1 <- caret::confusionMatrix(as.factor(flight.C50.pred1), as.factor(flight.val$Class),
+                positive="1", dnn=c("Predicted", "Actual"), mode="prec_recall")
+
+c50.acc.1 <- c50.matrix1[["overall"]][["Accuracy"]]
+c50.kappa.1 <- c50.matrix1[["overall"]][["Kappa"]]
+c50.f1.1 <- c50.matrix1[["byClass"]][["F1"]]
+c50.prec.1 <- c50.matrix1[["byClass"]][["Precision"]]
+c50.recall.1 <- c50.matrix1[["byClass"]][["Recall"]]
+
+c50.matrix1
+
+```
+
+The confusion matrix above shows that more false negatives exceeded false positives by more than 2X.
+
+
+#### Failure Analysis  
+  
+The performance metrics for the model are not high. It's difficult to establish what caused poor performance since the training and validations sets have similar proportions of each variable. This would have ideally resulted in a properly trained model and a validation set that doesn't have test cases with never-before-seen values. The low performance of the model could likely be due to the fact that each day of the week and each airline, for the most part, have a roughly even split of on-time and delayed flights. The delays are more likely due to factors not accounted for in the dataset.
+
+```{r C50DayFailureAnalysis, echo=F, comment=""}
+
+# Create new data frame containing rows from validation set where incorrect predictions were made
+C50.misclassified <- flight.val[which(flight.C50.pred1 != flight.val$Class),]
+# Save days of week in sorted vector
+days <- sort(unique(C50.misclassified$DayOfWeek))
+
+# Create vector to store number of misclassificar=tions for each day of the week
+C50count.day.mis <- rep(NA, length(days))
+for (i in 1:length(days)) {
+  # Fill misclassification vector with frequency for each day of the week
+  C50count.day.mis[i] <- length(which(C50.misclassified$DayOfWeek == days[i]))
+}
+
+barplot(C50count.day.mis, names = days, xlab = "Day of Week", ylab = "Frequency", col = "midnightblue",
+        main = "Number of Misclassifications by Decision Tree per Weekday")
+
+```
+
+```{r C50AirlineFailureAnalysis, echo=F, comment=""}
+
+# Display similar bar chart with misclassifications by airline
+airlines <- sort(unique(C50.misclassified$Airline))
+C50count.airline.mis <- rep(NA, length(airlines))
+for (i in 1:length(airlines)) {
+  C50count.airline.mis[i] <- length(which(C50.misclassified$Airline == airlines[i]))
+}
+
+barplot(C50count.airline.mis, xlab = "Airline", ylab = "Frequency", col = "orangered4", names = airlines,
+        las = 2, main = "Number of Misclassifications by Decision Tree per Airline")
+
+```
+
+As shown in the plots above, there is little variation in the number of incorrect predictions for each day of the week. The variation in incorrect classifications for airline is similar to the distribution of the total number of flights for each airline. 
+
+
+### C50 Hyperparameter Tuning
+
+To improve the performance of the model, it will be boosted by setting the _trials_ argument to 10. 
+
+```{r C50.2, echo=F, comment=""}
+
+flight.C50.2 <- C5.0(as.factor(Class) ~ Time + Length + DayOfWeek + AirlineEncode + AirportFromEncode + AirportToEncode,
+                     data = flight.train, trials = 10)
+flight.C50.pred2 <- predict(flight.C50.2, flight.val)
+c50.matrix2 <- caret::confusionMatrix(as.factor(flight.C50.pred2), as.factor(flight.val$Class),
+                positive="1", dnn=c("Predicted", "Actual"), mode="prec_recall")
+
+c50.acc.2 <- c50.matrix2[["overall"]][["Accuracy"]]
+c50.kappa.2 <- c50.matrix2[["overall"]][["Kappa"]]
+c50.f1.2 <- c50.matrix2[["byClass"]][["F1"]]
+c50.prec.2 <- c50.matrix2[["byClass"]][["Precision"]]
+c50.recall.2 <- c50.matrix2[["byClass"]][["Recall"]]
+
+```
+
+For further optimization, error costs will be applied. For this problem, classifying a delayed flight (1, positive) as not delayed (0, negative) will be given a higher error cost.
+
+```{r C50.3, echo=F, comment=""}
+
+matrix_dimensions <- list(c(0, 1), c(0, 1))
+names(matrix_dimensions) <- c("Predicted", "Actual")
+error_cost <- matrix(c(0, 3, 1, 0), nrow = 2, dimnames = matrix_dimensions)
+
+flight.C50.3 <- C5.0(as.factor(Class) ~ Time + Length + DayOfWeek + AirlineEncode + AirportFromEncode + AirportToEncode,
+                     data = flight.train, trials = 11, costs = error_cost)
+flight.C50.pred3 <- predict(flight.C50.3, flight.val)
+c50.matrix3 <- caret::confusionMatrix(as.factor(flight.C50.pred3), as.factor(flight.val$Class),
+                positive="1", dnn=c("Predicted", "Actual"), mode="prec_recall")
+
+c50.acc.3 <- c50.matrix3[["overall"]][["Accuracy"]]
+c50.kappa.3 <- c50.matrix3[["overall"]][["Kappa"]]
+c50.f1.3 <- c50.matrix3[["byClass"]][["F1"]]
+c50.prec.3 <- c50.matrix3[["byClass"]][["Precision"]]
+c50.recall.3 <- c50.matrix3[["byClass"]][["Recall"]]
+
+```
+
+
+## Logistic Regression
+
+A binomial logistic regression model will be used since the target variable can be one of two outcomes, 0 or 1. For the first iteration, a threshold probability of 0.5 will be used to classify flights in the positive class.
+
+```{r LogisticModel1, echo=F, comment=""}
+
+flight.bin.log <- glm(as.factor(Class) ~ Time + Length + DayOfWeek + AirlineEncode + AirportFromEncode + AirportToEncode,
+                      data = flight.train, family=binomial)
+
+# Predict flight delay using regression model
+flight.bin.prob <- predict(flight.bin.log, flight.val, type = "response")
+# If the calculated probability is greater than 0.5 then classify that outcome as a delay
+flight.bin.pred <- ifelse(flight.bin.prob > 0.5, 1, 0)
+# Calculate accuracy by dividing number of correct predictions by number of flights
+flight.bin.acc <- length(which(flight.bin.pred == flight.val$Class)) / nrow(flight.val) * 100
+
+log.matrix1 <- caret::confusionMatrix(as.factor(flight.bin.pred), as.factor(flight.val$Class),
+                positive="1", dnn=c("Predicted", "Actual"), mode="prec_recall")
+
+log.acc.1 <- log.matrix1[["overall"]][["Accuracy"]]
+log.kappa.1 <- log.matrix1[["overall"]][["Kappa"]]
+log.f1.1 <- log.matrix1[["byClass"]][["F1"]]
+log.prec.1 <- log.matrix1[["byClass"]][["Precision"]]
+log.recall.1 <- log.matrix1[["byClass"]][["Recall"]]
+
+log.matrix1
+
+```
+
+A similar logistic regression model will be constructed with a threshold of 0.56.
+
+```{r LogisticModel2, echo=F, comment=""}
+
+flight.bin.log2 <- glm(as.factor(Class) ~ Time + Length + DayOfWeek + AirlineEncode + AirportFromEncode + AirportToEncode,
+                       data = flight.train, family=binomial)
+
+# Predict pass/fail using regression model
+flight.bin.prob2 <- predict(flight.bin.log2, flight.val, type = "response")
+# If the calculated probability is greater than 0.5 then classify that outcome as a pass
+flight.bin.pred2 <- ifelse(flight.bin.prob2 > 0.56, 1, 0)
+# Calculate accuracy by dividing number of correct predictions by number of students
+flight.bin.acc2 <- length(which(flight.bin.pred2 == flight.val$Class)) / nrow(flight.val) * 100
+
+log.matrix2 <- caret::confusionMatrix(as.factor(flight.bin.pred2), as.factor(flight.val$Class),
+                positive="1", dnn=c("Predicted", "Actual"), mode="prec_recall")
+
+log.acc.2 <- log.matrix2[["overall"]][["Accuracy"]]
+log.kappa.2 <- log.matrix2[["overall"]][["Kappa"]]
+log.f1.2 <- log.matrix2[["byClass"]][["F1"]]
+log.prec.2 <- log.matrix2[["byClass"]][["Precision"]]
+log.recall.2 <- log.matrix2[["byClass"]][["Recall"]]
+
+```
+
+
+## kNN
+
+The _knn()_ function from **class** package will be used to build a kNN model. 
+
+```{r kNNData, echo=F, comment=""}
+
+flight.knn.train <- flight.train[c("Time", "Length", "DayOfWeek", "AirlineEncode", "AirportFromEncode", "AirportToEncode")]
+flight.knn.val <- flight.val[c("Time", "Length", "DayOfWeek", "AirlineEncode", "AirportFromEncode", "AirportToEncode")]
+flight.knn.train.labels <- flight.train[,"Class"]
+flight.knn.val.labels <- flight.val[,"Class"]
+
+```
+
+For the first iteration, a k value of 85 will be used for the algorithm.
+
+```{r kNN1, echo=F, comment=""}
+
+flight.knn.pred <- knn(flight.knn.train, flight.knn.val, flight.knn.train.labels, 85)
+knn.matrix1 <- caret::confusionMatrix(as.factor(flight.knn.pred), as.factor(flight.knn.val.labels),
+                                      positive="1", dnn=c("Predicted", "Actual"), mode="prec_recall")
+
+knn.acc.1 <- knn.matrix1[["overall"]][["Accuracy"]]
+knn.kappa.1 <- knn.matrix1[["overall"]][["Kappa"]]
+knn.f1.1 <- knn.matrix1[["byClass"]][["F1"]]
+knn.prec.1 <- knn.matrix1[["byClass"]][["Precision"]]
+knn.recall.1 <- knn.matrix1[["byClass"]][["Recall"]]
+
+knn.matrix1
+
+```
+
+### kNN Hyperparameter Tuning
+
+A similar model will be constructed with a higher k of 100.
+
+```{r kNN2, echo=F, comment=""}
+
+flight.knn.pred2 <- knn(flight.knn.train, flight.knn.val, flight.knn.train.labels, 100)
+knn.matrix2 <- caret::confusionMatrix(as.factor(flight.knn.pred2), as.factor(flight.knn.val.labels),
+                positive="1", dnn=c("Predicted", "Actual"), mode="prec_recall")
+
+knn.acc.2 <- knn.matrix2[["overall"]][["Accuracy"]]
+knn.kappa.2 <- knn.matrix2[["overall"]][["Kappa"]]
+knn.f1.2 <- knn.matrix2[["byClass"]][["F1"]]
+knn.prec.2 <- knn.matrix2[["byClass"]][["Precision"]]
+knn.recall.2 <- knn.matrix2[["byClass"]][["Recall"]]
+
+```
+
+
+## Ensemble Model
+
+Each of the 3 types of models with the highest accuracy will be used to build an ensemble learner. A positive classification will be made if at least 2 of the individual models make a positive prediction. For the Decision Tree and kNN models, since the target variable is a factor with 2 levels, the levels are 1 and 2. Whereas the predictions for the Logistic Regression model are either 0 or 1. Therefore, a sum of at least 3 is required for the ensemble model to predict that a flight will be delayed.
+
+```{r Ensemble, echo=F, comment=""}
+
+predictOutcomeClass <- function(new.data) {
+
+  # C5.0 decision tree
+  c50.pred <- as.numeric(predict(flight.C50.3, newdata = new.data))
+
+  # Logistic regression
+  log.prob <- predict(flight.bin.log2, new.data, type = "response")
+  log.pred <- ifelse(log.prob > 0.5, 1, 0)
+
+  # kNN prediction
+  knn.pred <- as.numeric(knn(flight.knn.train, flight.knn.val, flight.knn.train.labels, 100))
+
+  # Sum of predictions
+  pred.sum <- c50.pred + log.pred + knn.pred
+
+  # Final prediction
+  e.pred <- ifelse(pred.sum >= 3, 1, 0)
+
+  return(e.pred)
+}
+
+ensemble.matrix <- caret::confusionMatrix(as.factor(predictOutcomeClass(flight.val)), as.factor(flight.val$Class),
+                                          positive="1", dnn=c("Predicted", "Actual"), mode="prec_recall")
+
+ensemble.acc <- ensemble.matrix[["overall"]][["Accuracy"]]
+ensemble.kappa <- ensemble.matrix[["overall"]][["Kappa"]]
+ensemble.f1 <- ensemble.matrix[["byClass"]][["F1"]]
+ensemble.prec <- ensemble.matrix[["byClass"]][["Precision"]]
+ensemble.recall <- ensemble.matrix[["byClass"]][["Recall"]]
+
+```
+
+
+# Model Comparison
+
+A confusion matrix was constructed for each model's predictions using the **caret** package. A table displaying evaluation metrics is shown below.
+
+```{r ModelComparison, echo=F, comment=""}
+
+model.comparison <- data.frame(rbind
+                               (c(c50.acc.1, c50.kappa.1, c50.f1.1, c50.prec.1, c50.recall.1),
+                                 c(c50.acc.2, c50.kappa.2, c50.f1.2, c50.prec.2, c50.recall.2),
+                                 c(c50.acc.3, c50.kappa.3, c50.f1.3, c50.prec.3, c50.recall.3),
+                                 c(log.acc.1, log.kappa.1, log.f1.1, log.prec.1, log.recall.1),
+                                 c(log.acc.2, log.kappa.2, log.f1.2, log.prec.2, log.recall.2),
+                                 c(knn.acc.1, knn.kappa.1, knn.f1.1, knn.prec.1, knn.recall.1),
+                                 c(knn.acc.2, knn.kappa.2, knn.f1.2, knn.prec.2, knn.recall.2),
+                                 c(ensemble.acc, ensemble.kappa, ensemble.f1, ensemble.prec, ensemble.recall)
+                               ))
+rownames(model.comparison) <- c("C50 Default", "C50 10 Trials", "C50 w/ Error Cost",
+                                 "Logistic Regression", "Logistic Regression w/ 0.56 Threshold",
+                                 "kNN w/ k=85", "kNN w/ k=100", "Ensemble")
+colnames(model.comparison) <- c("Accuracy", "Kappa", "F1", "Precision", "Recall")
+round(model.comparison, 3)
+
+```
+  
+  
+The Logistic Regression model with 0.56 probability threshold yielded highest precision but lowest Kappa and lowest recall. Only 1/3 of delayed flights were predicted to be delayed by this model, but of those predictions ~67% were truly delayed. The accuracy of this model was comparable to the others. 
+
+The Decision Tree model with 11 trials and error costs had the same accuracy as the kNN model with a k of 100, which was the highest overall at 64.6%. All other performance metrics for these two models are similar, with Kappa, F1 and recall being marginally higher for the kNN model. For a classification problem such as this, recall would be more important than precision because we want to maximize the percentage of delayed flights predicted as delayed. Therefore, kNN (k=100) outperformed the Decision Tree with error costs.
+
+The Ensemble model had the highest recall but the lowest precision. That is, it was able to identify the most delayed flights out of all delayed flights, but made more false positive predictions (predicted non-delayed flights as delayed) than all the other models.
+
+The performance metrics are all similar for all the models, so it can be concluded that the failures are due to the same reason. This indicates that additional variables are required to more accurately predict flight delays. Factors such as weather, staffing resources, air traffic, among others, factor in to a flight being delayed. 
