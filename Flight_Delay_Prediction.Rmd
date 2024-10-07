@@ -1,8 +1,7 @@
 ---
 title: "Airline Flight Delay Prediction Using Machine Learning Models"
-subtitle: "DA5030"
 author: "Janiel Thompson"
-date: "Spring 2024"
+date: "October 2024"
 output:
   pdf_document: default
   html_notebook: default
